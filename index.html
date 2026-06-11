@@ -6,8 +6,9 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>📋 PhuocIT TEST NEW v2.2 - Dashboard Fixed - Quản lý bán hàng offline</title>
-    <meta name="description" content="Hệ thống quản lý bán hàng PhuocIT cho doanh nghiệp Việt Nam - hoạt động hoàn toàn offline">
+    <title>📋 Shop Bán Hàng - Quản lý bán hàng</title>
+    <meta name="description" content="Hệ thống quản lý bán hàng cho doanh nghiệp Việt Nam">
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     
     <style>
 /* Vietnamese PhuocIT Offline Styling */
@@ -11153,6 +11154,231 @@
                     }
                 }
             });
+        });
+    </script>
+
+    <!-- Google Drive Integration -->
+    <script>
+        const GOOGLE_CLIENT_ID = '194348668683-lliskjs22gvngvij9v2uracus35q2o1k.apps.googleusercontent.com';
+        const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
+        const DATA_FILENAME = 'shopbanhang_data.json';
+
+        let driveAccessToken = null;
+        let driveFileId = null;
+        let autoSaveTimer = null;
+        let countdownTimer = null;
+        let nextSaveTime = null;
+
+        // ========== GOOGLE AUTH ==========
+        function initGoogleAuth() {
+            if (typeof google === 'undefined') {
+                setTimeout(initGoogleAuth, 500);
+                return;
+            }
+            const tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: GOOGLE_CLIENT_ID,
+                scope: DRIVE_SCOPE,
+                callback: async (response) => {
+                    if (response.error) {
+                        showDriveStatus('❌ Đăng nhập thất bại', 'error');
+                        return;
+                    }
+                    driveAccessToken = response.access_token;
+                    localStorage.setItem('drive_token', driveAccessToken);
+                    showDriveStatus('✅ Đã kết nối Google Drive', 'success');
+                    updateDriveUI(true);
+                    await findOrCreateDataFile();
+                    startAutoSave();
+                },
+            });
+            window._tokenClient = tokenClient;
+        }
+
+        function loginGoogle() {
+            if (!window._tokenClient) { showDriveStatus('⏳ Đang khởi tạo...', 'info'); setTimeout(loginGoogle, 800); return; }
+            window._tokenClient.requestAccessToken();
+        }
+
+        function logoutGoogle() {
+            if (driveAccessToken) google.accounts.oauth2.revoke(driveAccessToken);
+            driveAccessToken = null; driveFileId = null;
+            localStorage.removeItem('drive_token');
+            stopAutoSave();
+            updateDriveUI(false);
+            showDriveStatus('🔌 Đã ngắt kết nối Drive', 'info');
+        }
+
+        // ========== DRIVE FILE OPS ==========
+        async function findOrCreateDataFile() {
+            showDriveStatus('🔍 Đang tìm file data...', 'info');
+            try {
+                // Tìm file đã có
+                const res = await fetch(
+                    `https://www.googleapis.com/drive/v3/files?q=name='${DATA_FILENAME}' and trashed=false&fields=files(id,name,modifiedTime)`,
+                    { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+                );
+                const data = await res.json();
+                if (data.files && data.files.length > 0) {
+                    driveFileId = data.files[0].id;
+                    showDriveStatus(`📂 Tìm thấy file data (${new Date(data.files[0].modifiedTime).toLocaleDateString('vi-VN')})`, 'success');
+                    // Hỏi có muốn load data từ Drive không
+                    if (confirm('Tìm thấy data trên Google Drive!\nBấm OK để tải data từ Drive lên (ghi đè data hiện tại)\nBấm Cancel để giữ data hiện tại')) {
+                        await loadFromDrive();
+                    }
+                } else {
+                    showDriveStatus('📝 Chưa có file data, sẽ tạo mới khi lưu', 'info');
+                }
+            } catch(e) {
+                showDriveStatus('❌ Lỗi kết nối Drive', 'error');
+            }
+        }
+
+        async function loadFromDrive() {
+            if (!driveAccessToken || !driveFileId) { showDriveStatus('⚠️ Chưa kết nối Drive', 'warning'); return; }
+            showDriveStatus('⬇️ Đang tải data từ Drive...', 'info');
+            try {
+                const res = await fetch(
+                    `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`,
+                    { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+                );
+                const data = await res.json();
+                localStorage.setItem('PhuocIT_vietnam_data', JSON.stringify(data));
+                if (window.app) {
+                    window.app.initializeData();
+                    window.app.loadPage(window.app.currentPage);
+                }
+                showDriveStatus('✅ Đã tải data từ Drive thành công!', 'success');
+                if (window.app) window.app.showNotification('Đã tải data từ Google Drive!', 'success');
+            } catch(e) {
+                showDriveStatus('❌ Lỗi tải data', 'error');
+            }
+        }
+
+        async function saveToDrive() {
+            if (!driveAccessToken) { showDriveStatus('⚠️ Chưa đăng nhập Google Drive', 'warning'); return; }
+            showDriveStatus('⬆️ Đang lưu lên Drive...', 'info');
+            try {
+                const dataStr = localStorage.getItem('PhuocIT_vietnam_data') || '{}';
+                const blob = new Blob([dataStr], { type: 'application/json' });
+
+                let url, method;
+                if (driveFileId) {
+                    url = `https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`;
+                    method = 'PATCH';
+                } else {
+                    // Tạo file mới với metadata
+                    const meta = { name: DATA_FILENAME, mimeType: 'application/json' };
+                    const form = new FormData();
+                    form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+                    form.append('file', blob);
+                    const res = await fetch(
+                        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+                        { method: 'POST', headers: { Authorization: `Bearer ${driveAccessToken}` }, body: form }
+                    );
+                    const result = await res.json();
+                    driveFileId = result.id;
+                    const now = new Date().toLocaleTimeString('vi-VN');
+                    showDriveStatus(`✅ Đã lưu lên Drive lúc ${now}`, 'success');
+                    if (window.app) window.app.showNotification('Đã lưu lên Google Drive!', 'success');
+                    resetAutoSaveCountdown();
+                    return;
+                }
+
+                await fetch(url, { method, headers: { Authorization: `Bearer ${driveAccessToken}`, 'Content-Type': 'application/json' }, body: dataStr });
+                const now = new Date().toLocaleTimeString('vi-VN');
+                showDriveStatus(`✅ Đã lưu lúc ${now}`, 'success');
+                if (window.app) window.app.showNotification('Đã lưu lên Google Drive!', 'success');
+                resetAutoSaveCountdown();
+            } catch(e) {
+                showDriveStatus('❌ Lỗi lưu Drive', 'error');
+            }
+        }
+
+        // ========== AUTO SAVE ==========
+        function startAutoSave() {
+            stopAutoSave();
+            resetAutoSaveCountdown();
+        }
+
+        function stopAutoSave() {
+            if (autoSaveTimer) clearTimeout(autoSaveTimer);
+            if (countdownTimer) clearInterval(countdownTimer);
+            autoSaveTimer = null; countdownTimer = null;
+        }
+
+        function resetAutoSaveCountdown() {
+            if (autoSaveTimer) clearTimeout(autoSaveTimer);
+            if (countdownTimer) clearInterval(countdownTimer);
+            nextSaveTime = Date.now() + 15 * 60 * 1000;
+            autoSaveTimer = setTimeout(() => { saveToDrive(); }, 15 * 60 * 1000);
+            countdownTimer = setInterval(updateCountdown, 1000);
+            updateCountdown();
+        }
+
+        function updateCountdown() {
+            const el = document.getElementById('drive-countdown');
+            if (!el || !nextSaveTime) return;
+            const remaining = Math.max(0, Math.round((nextSaveTime - Date.now()) / 1000));
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            el.textContent = `Auto save: ${m}:${s.toString().padStart(2,'0')}`;
+        }
+
+        // ========== UI ==========
+        function showDriveStatus(msg, type) {
+            const el = document.getElementById('drive-status');
+            if (!el) return;
+            const colors = { success: '#059669', error: '#dc2626', info: '#2563eb', warning: '#d97706' };
+            el.textContent = msg;
+            el.style.color = colors[type] || '#2563eb';
+        }
+
+        function updateDriveUI(loggedIn) {
+            const btnLogin = document.getElementById('btn-drive-login');
+            const btnLogout = document.getElementById('btn-drive-logout');
+            const btnSave = document.getElementById('btn-drive-save');
+            const btnLoad = document.getElementById('btn-drive-load');
+            const countdown = document.getElementById('drive-countdown');
+            if (btnLogin) btnLogin.style.display = loggedIn ? 'none' : 'inline-flex';
+            if (btnLogout) btnLogout.style.display = loggedIn ? 'inline-flex' : 'none';
+            if (btnSave) btnSave.style.display = loggedIn ? 'inline-flex' : 'none';
+            if (btnLoad) btnLoad.style.display = loggedIn ? 'inline-flex' : 'none';
+            if (countdown) countdown.style.display = loggedIn ? 'inline' : 'none';
+        }
+
+        // Inject Drive toolbar vào header
+        function injectDriveToolbar() {
+            const header = document.querySelector('.header');
+            if (!header || document.getElementById('drive-toolbar')) return;
+            const toolbar = document.createElement('div');
+            toolbar.id = 'drive-toolbar';
+            toolbar.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;padding:10px 32px;background:#f8fafc;border-bottom:1px solid #e5e7eb;font-size:13px;';
+            toolbar.innerHTML = `
+                <span style="font-weight:600;color:#374151;">☁️ Google Drive:</span>
+                <span id="drive-status" style="color:#6b7280;">Chưa kết nối</span>
+                <span id="drive-countdown" style="color:#6b7280;display:none;"></span>
+                <button id="btn-drive-login" onclick="loginGoogle()" style="background:#2563eb;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;">
+                    🔑 Đăng nhập Drive
+                </button>
+                <button id="btn-drive-save" onclick="saveToDrive()" style="background:#059669;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;display:none;align-items:center;gap:4px;">
+                    💾 Lưu Drive
+                </button>
+                <button id="btn-drive-load" onclick="loadFromDrive()" style="background:#7c3aed;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;display:none;align-items:center;gap:4px;">
+                    ⬇️ Tải Drive
+                </button>
+                <button id="btn-drive-logout" onclick="logoutGoogle()" style="background:#6b7280;color:white;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;display:none;align-items:center;gap:4px;">
+                    🔌 Ngắt kết nối
+                </button>
+            `;
+            header.insertAdjacentElement('afterend', toolbar);
+        }
+
+        // Khởi động
+        window.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                injectDriveToolbar();
+                initGoogleAuth();
+            }, 500);
         });
     </script>
 </body>
